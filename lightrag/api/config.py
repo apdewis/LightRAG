@@ -266,6 +266,39 @@ def parse_args() -> argparse.Namespace:
         help="Enable DOCLING document loading engine (default: from env or DEFAULT)",
     )
 
+    # Multimodal / RAGAnything configuration
+    parser.add_argument(
+        "--enable-multimodal",
+        type=lambda x: x.lower() == "true",
+        default=get_env_value("ENABLE_MULTIMODAL", False, lambda x: x.lower() == "true"),
+        help="Enable multimodal document processing via RAGAnything (default: from env or false)",
+    )
+    parser.add_argument(
+        "--vlm-binding",
+        default=get_env_value("VLM_BINDING", None),
+        help="Vision Language Model binding type: openai, ollama, gemini (default: from env or same as llm_binding)",
+    )
+    parser.add_argument(
+        "--vlm-model",
+        default=get_env_value("VLM_MODEL", "gpt-4o"),
+        help="Vision Language Model name (default: from env or gpt-4o)",
+    )
+    parser.add_argument(
+        "--vlm-binding-host",
+        default=get_env_value("VLM_BINDING_HOST", None),
+        help="VLM API host URL (default: from env or same as llm_binding_host)",
+    )
+    parser.add_argument(
+        "--vlm-binding-api-key",
+        default=get_env_value("VLM_BINDING_API_KEY", None),
+        help="VLM API key (default: from env or same as llm_binding_api_key)",
+    )
+    parser.add_argument(
+        "--multimodal-output-dir",
+        default=get_env_value("MULTIMODAL_OUTPUT_DIR", "./multimodal_output"),
+        help="Output directory for multimodal processing artifacts (default: from env or ./multimodal_output)",
+    )
+
     # Conditionally add binding-specific options (Ollama, OpenAI, Azure OpenAI, Gemini)
     # This registers command line arguments (e.g., --openai-llm-temperature)
     # and reads corresponding environment variables (e.g., OPENAI_LLM_TEMPERATURE)

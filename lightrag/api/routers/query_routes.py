@@ -5,6 +5,7 @@ This module contains all query-related routes for the LightRAG API.
 import json
 from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from lightrag.base import QueryParam
 from lightrag.api.utils_api import get_combined_auth_dependency
 from lightrag.utils import logger
@@ -110,6 +111,16 @@ class QueryRequest(BaseModel):
         description="If True, enables streaming output for real-time responses. Only affects /query/stream endpoint.",
     )
 
+    multimodal_content: Optional[list[dict]] = Field(
+        default=None,
+        description="Optional list of multimodal content items for combined text+image/table/equation queries. "
+        "Each item is a dict with 'type' key and type-specific data. "
+        "Supported types: 'image' (with 'image_data' base64 string), "
+        "'table' (with 'table_data' and optional 'table_caption'), "
+        "'equation' (with 'latex' and optional 'equation_caption'). "
+        "Requires ENABLE_MULTIMODAL=true on the server.",
+    )
+
     @field_validator("query", mode="after")
     @classmethod
     def query_strip_after(cls, query: str) -> str:
@@ -134,7 +145,8 @@ class QueryRequest(BaseModel):
         # Use Pydantic's `.model_dump(exclude_none=True)` to remove None values automatically
         # Exclude API-level parameters that don't belong in QueryParam
         request_data = self.model_dump(
-            exclude_none=True, exclude={"query", "include_chunk_content"}
+            exclude_none=True,
+            exclude={"query", "include_chunk_content", "multimodal_content"},
         )
 
         # Ensure `mode` and `stream` are set explicitly
@@ -190,7 +202,7 @@ class StreamChunkResponse(BaseModel):
     )
 
 
-def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
+def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag_anything=None):
     combined_auth = get_combined_auth_dependency(api_key)
 
     @router.post(
@@ -402,6 +414,36 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                 - 500: Internal processing error (e.g., LLM service unavailable)
         """
         try:
+            # Check if this is a multimodal query
+            if request.multimodal_content and rag_anything is not None:
+                try:
+                    result = await rag_anything.aquery_with_multimodal(
+                        request.query,
+                        multimodal_content=request.multimodal_content,
+                        mode=request.mode,
+                    )
+                    # aquery_with_multimodal returns a string response
+                    if request.include_references:
+                        return JSONResponse(
+                            content={
+                                "response": result,
+                                "references": [],
+                            }
+                        )
+                    return JSONResponse(content={"response": result})
+                except Exception as e:
+                    logger.error(f"Multimodal query failed: {e}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Multimodal query failed: {str(e)}",
+                    )
+            elif request.multimodal_content and rag_anything is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Multimodal queries require ENABLE_MULTIMODAL=true on the server and raganything package installed.",
+                )
+
+            # Standard text-only query path (existing code unchanged)
             param = request.to_query_params(
                 False
             )  # Ensure stream=False for non-streaming endpoint
@@ -660,6 +702,39 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             Use streaming mode for real-time interfaces and non-streaming for batch processing.
         """
         try:
+            # Check if this is a multimodal query
+            if request.multimodal_content and rag_anything is not None:
+                try:
+                    result = await rag_anything.aquery_with_multimodal(
+                        request.query,
+                        multimodal_content=request.multimodal_content,
+                        mode=request.mode,
+                    )
+                    # Return multimodal result as a single streaming response
+                    async def multimodal_stream():
+                        if request.include_references:
+                            yield json.dumps({"references": []}) + "\n"
+                        yield json.dumps({"response": result}) + "\n"
+
+                    from fastapi.responses import StreamingResponse as _StreamingResponse
+
+                    return _StreamingResponse(
+                        multimodal_stream(),
+                        media_type="application/x-ndjson",
+                    )
+                except Exception as e:
+                    logger.error(f"Multimodal query failed: {e}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Multimodal query failed: {str(e)}",
+                    )
+            elif request.multimodal_content and rag_anything is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Multimodal queries require ENABLE_MULTIMODAL=true on the server and raganything package installed.",
+                )
+
+            # Standard text-only query path (existing code unchanged)
             # Use the stream parameter from the request, defaulting to True if not specified
             stream_mode = request.stream if request.stream is not None else True
             param = request.to_query_params(stream_mode)

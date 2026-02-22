@@ -49,6 +49,10 @@ pytest = [
     "ruff",
 ]
 
+multimodal = [
+    "raganything[all]",
+]
+
 api = [
     # Core dependencies
     "aiohttp",

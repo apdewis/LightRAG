@@ -761,6 +761,17 @@ class PipelineStatusResponse(BaseModel):
 
 
 class DocumentManager:
+    # Image extensions for multimodal support
+    MULTIMODAL_EXTENSIONS = (
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".webp",
+        ".svg",
+    )
+
     def __init__(
         self,
         input_dir: str,
@@ -807,11 +818,19 @@ class DocumentManager:
             ".scss",  # Sassy CSS
             ".less",  # LESS CSS
         ),
+        enable_multimodal: bool = False,
     ):
         # Store the base input directory and workspace
         self.base_input_dir = Path(input_dir)
         self.workspace = workspace
-        self.supported_extensions = supported_extensions
+        self.enable_multimodal = enable_multimodal
+
+        # Extend supported extensions with image types if multimodal is enabled
+        if enable_multimodal:
+            self.supported_extensions = supported_extensions + self.MULTIMODAL_EXTENSIONS
+        else:
+            self.supported_extensions = supported_extensions
+
         self.indexed_files = set()
 
         # Create workspace-specific input directory
@@ -1192,7 +1211,7 @@ def _extract_xlsx(file_bytes: bytes) -> str:
 
 
 async def pipeline_enqueue_file(
-    rag: LightRAG, file_path: Path, track_id: str = None
+    rag: LightRAG, file_path: Path, track_id: str = None, rag_anything=None
 ) -> tuple[bool, str]:
     """Add a file to the queue for processing
 
@@ -1200,6 +1219,7 @@ async def pipeline_enqueue_file(
         rag: LightRAG instance
         file_path: Path to the saved file
         track_id: Optional tracking ID, if not provided will be generated
+        rag_anything: Optional RAGAnything instance for multimodal processing
     Returns:
         tuple: (success: bool, track_id: str)
     """
@@ -1514,6 +1534,83 @@ async def pipeline_enqueue_file(
                         )
                         return False, track_id
 
+                case ".png" | ".jpg" | ".jpeg" | ".gif" | ".bmp" | ".webp" | ".svg":
+                    # Multimodal image processing via RAGAnything
+                    if rag_anything is None:
+                        error_files = [
+                            {
+                                "file_path": str(file_path.name),
+                                "error_description": "[File Extraction]Image files require multimodal support (ENABLE_MULTIMODAL=true)",
+                                "original_error": "Multimodal processing is not enabled or raganything is not installed",
+                                "file_size": file_size,
+                            }
+                        ]
+                        await rag.apipeline_enqueue_error_documents(
+                            error_files, track_id
+                        )
+                        logger.error(
+                            f"[File Extraction]Image file {file_path.name} rejected: multimodal not enabled"
+                        )
+                        return False, track_id
+
+                    try:
+                        # Use RAGAnything to process the image
+                        import base64
+
+                        image_base64 = base64.b64encode(file).decode("utf-8")
+
+                        # Determine MIME type from extension
+                        mime_types = {
+                            ".png": "image/png",
+                            ".jpg": "image/jpeg",
+                            ".jpeg": "image/jpeg",
+                            ".gif": "image/gif",
+                            ".bmp": "image/bmp",
+                            ".webp": "image/webp",
+                            ".svg": "image/svg+xml",
+                        }
+                        mime_type = mime_types.get(ext, "image/png")
+
+                        # Process via RAGAnything's multimodal content processing
+                        multimodal_content = [
+                            {
+                                "type": "image",
+                                "image_data": image_base64,
+                                "mime_type": mime_type,
+                                "image_caption": f"Uploaded image: {file_path.name}",
+                            }
+                        ]
+
+                        await rag_anything.process_multimodal_content(
+                            multimodal_content=multimodal_content,
+                            text_content=f"Image file: {file_path.name}",
+                        )
+
+                        logger.info(
+                            f"[Multimodal]Successfully processed image: {file_path.name}"
+                        )
+                        # For images processed via RAGAnything, we still need to
+                        # register them in the document pipeline for tracking
+                        content = f"[Multimodal Image] {file_path.name} - processed via RAGAnything"
+
+                    except Exception as e:
+                        error_files = [
+                            {
+                                "file_path": str(file_path.name),
+                                "error_description": "[File Extraction]Multimodal image processing error",
+                                "original_error": f"Failed to process image via RAGAnything: {str(e)}",
+                                "file_size": file_size,
+                            }
+                        ]
+                        await rag.apipeline_enqueue_error_documents(
+                            error_files, track_id
+                        )
+                        logger.error(
+                            f"[File Extraction]Error processing image {file_path.name}: {str(e)}"
+                        )
+                        logger.error(traceback.format_exc())
+                        return False, track_id
+
                 case _:
                     error_files = [
                         {
@@ -1648,17 +1745,20 @@ async def pipeline_enqueue_file(
                 logger.error(f"Error deleting file {file_path}: {str(e)}")
 
 
-async def pipeline_index_file(rag: LightRAG, file_path: Path, track_id: str = None):
+async def pipeline_index_file(
+    rag: LightRAG, file_path: Path, track_id: str = None, rag_anything=None
+):
     """Index a file with track_id
 
     Args:
         rag: LightRAG instance
         file_path: Path to the saved file
         track_id: Optional tracking ID
+        rag_anything: Optional RAGAnything instance for multimodal processing
     """
     try:
         success, returned_track_id = await pipeline_enqueue_file(
-            rag, file_path, track_id
+            rag, file_path, track_id, rag_anything=rag_anything
         )
         if success:
             await rag.apipeline_process_enqueue_documents()
@@ -1669,7 +1769,7 @@ async def pipeline_index_file(rag: LightRAG, file_path: Path, track_id: str = No
 
 
 async def pipeline_index_files(
-    rag: LightRAG, file_paths: List[Path], track_id: str = None
+    rag: LightRAG, file_paths: List[Path], track_id: str = None, rag_anything=None
 ):
     """Index multiple files sequentially to avoid high CPU load
 
@@ -1677,6 +1777,7 @@ async def pipeline_index_files(
         rag: LightRAG instance
         file_paths: Paths to the files to index
         track_id: Optional tracking ID to pass to all files
+        rag_anything: Optional RAGAnything instance for multimodal processing
     """
     if not file_paths:
         return
@@ -1690,7 +1791,9 @@ async def pipeline_index_files(
 
         # Process files sequentially with track_id
         for file_path in sorted_file_paths:
-            success, _ = await pipeline_enqueue_file(rag, file_path, track_id)
+            success, _ = await pipeline_enqueue_file(
+                rag, file_path, track_id, rag_anything=rag_anything
+            )
             if success:
                 enqueued = True
 
@@ -1731,7 +1834,10 @@ async def pipeline_index_texts(
 
 
 async def run_scanning_process(
-    rag: LightRAG, doc_manager: DocumentManager, track_id: str = None
+    rag: LightRAG,
+    doc_manager: DocumentManager,
+    track_id: str = None,
+    rag_anything=None,
 ):
     """Background task to scan and index documents
 
@@ -1739,6 +1845,7 @@ async def run_scanning_process(
         rag: LightRAG instance
         doc_manager: DocumentManager instance
         track_id: Optional tracking ID to pass to all scanned files
+        rag_anything: Optional RAGAnything instance for multimodal processing
     """
     try:
         new_files = doc_manager.scan_directory_for_new_files()
@@ -1764,7 +1871,9 @@ async def run_scanning_process(
 
             # Process valid files (new files + non-PROCESSED status files)
             if valid_files:
-                await pipeline_index_files(rag, valid_files, track_id)
+                await pipeline_index_files(
+                    rag, valid_files, track_id, rag_anything=rag_anything
+                )
                 if processed_files:
                     logger.info(
                         f"Scanning process completed: {len(valid_files)} files Processed {len(processed_files)} skipped."
@@ -2040,7 +2149,10 @@ async def background_delete_documents(
 
 
 def create_document_routes(
-    rag: LightRAG, doc_manager: DocumentManager, api_key: Optional[str] = None
+    rag: LightRAG,
+    doc_manager: DocumentManager,
+    api_key: Optional[str] = None,
+    rag_anything=None,
 ):
     # Create combined auth dependency for document routes
     combined_auth = get_combined_auth_dependency(api_key)
@@ -2063,7 +2175,9 @@ def create_document_routes(
         track_id = generate_track_id("scan")
 
         # Start the scanning process in the background with track_id
-        background_tasks.add_task(run_scanning_process, rag, doc_manager, track_id)
+        background_tasks.add_task(
+            run_scanning_process, rag, doc_manager, track_id, rag_anything=rag_anything
+        )
         return ScanResponse(
             status="scanning_started",
             message="Scanning process has been initiated in the background",
@@ -2222,7 +2336,9 @@ def create_document_routes(
             track_id = generate_track_id("upload")
 
             # Add to background tasks and get track_id
-            background_tasks.add_task(pipeline_index_file, rag, file_path, track_id)
+            background_tasks.add_task(
+                pipeline_index_file, rag, file_path, track_id, rag_anything=rag_anything
+            )
 
             return InsertResponse(
                 status="success",

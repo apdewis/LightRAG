@@ -344,7 +344,9 @@ def create_app(args):
     api_key = os.getenv("LIGHTRAG_API_KEY") or args.key
 
     # Initialize document manager with workspace support for data isolation
-    doc_manager = DocumentManager(args.input_dir, workspace=args.workspace)
+    doc_manager = DocumentManager(
+        args.input_dir, workspace=args.workspace, enable_multimodal=args.enable_multimodal
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -644,6 +646,177 @@ def create_app(args):
             except ImportError as e:
                 raise Exception(f"Failed to import {binding} options: {e}")
         return {}
+
+    def create_vision_model_func(
+        binding: str, model: str, host: str, api_key: str, llm_timeout: int
+    ):
+        """Create vision model function for RAGAnything multimodal processing.
+
+        The vision model function handles both text-only and image+text prompts.
+        When image_data is provided, it constructs a multimodal message with
+        base64-encoded image content.
+        """
+
+        async def vision_model_complete(
+            prompt,
+            system_prompt=None,
+            history_messages=None,
+            image_data=None,
+            **kwargs,
+        ):
+            if history_messages is None:
+                history_messages = []
+            kwargs["timeout"] = llm_timeout
+
+            if image_data:
+                # Multimodal request with image
+                if binding in ("openai", "azure_openai"):
+                    from lightrag.llm.openai import openai_complete_if_cache
+
+                    messages = []
+                    if system_prompt:
+                        messages.append(
+                            {"role": "system", "content": system_prompt}
+                        )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{image_data}"
+                                    },
+                                },
+                            ],
+                        }
+                    )
+
+                    return await openai_complete_if_cache(
+                        model,
+                        "",  # prompt is in messages
+                        system_prompt=None,
+                        history_messages=[],
+                        messages=messages,
+                        base_url=host,
+                        api_key=api_key,
+                        **kwargs,
+                    )
+                elif binding == "ollama":
+                    from lightrag.llm.ollama import ollama_model_complete
+
+                    # Ollama supports images via the images parameter
+                    kwargs["images"] = [image_data]
+                    return await ollama_model_complete(
+                        prompt,
+                        system_prompt=system_prompt,
+                        history_messages=history_messages,
+                        host=host,
+                        model=model,
+                        api_key=api_key,
+                        **kwargs,
+                    )
+                elif binding == "gemini":
+                    from lightrag.llm.gemini import gemini_complete_if_cache
+
+                    # For Gemini, pass image data through kwargs
+                    kwargs["image_data"] = image_data
+                    return await gemini_complete_if_cache(
+                        model,
+                        prompt,
+                        system_prompt=system_prompt,
+                        history_messages=history_messages,
+                        api_key=api_key,
+                        base_url=host,
+                        **kwargs,
+                    )
+                else:
+                    # Fallback: treat as OpenAI-compatible
+                    from lightrag.llm.openai import openai_complete_if_cache
+
+                    messages = []
+                    if system_prompt:
+                        messages.append(
+                            {"role": "system", "content": system_prompt}
+                        )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{image_data}"
+                                    },
+                                },
+                            ],
+                        }
+                    )
+
+                    return await openai_complete_if_cache(
+                        model,
+                        "",
+                        system_prompt=None,
+                        history_messages=[],
+                        messages=messages,
+                        base_url=host,
+                        api_key=api_key,
+                        **kwargs,
+                    )
+            else:
+                # Text-only request - delegate to standard LLM
+                if binding in ("openai", "azure_openai"):
+                    from lightrag.llm.openai import openai_complete_if_cache
+
+                    return await openai_complete_if_cache(
+                        model,
+                        prompt,
+                        system_prompt=system_prompt,
+                        history_messages=history_messages,
+                        base_url=host,
+                        api_key=api_key,
+                        **kwargs,
+                    )
+                elif binding == "ollama":
+                    from lightrag.llm.ollama import ollama_model_complete
+
+                    return await ollama_model_complete(
+                        prompt,
+                        system_prompt=system_prompt,
+                        history_messages=history_messages,
+                        host=host,
+                        model=model,
+                        api_key=api_key,
+                        **kwargs,
+                    )
+                elif binding == "gemini":
+                    from lightrag.llm.gemini import gemini_complete_if_cache
+
+                    return await gemini_complete_if_cache(
+                        model,
+                        prompt,
+                        system_prompt=system_prompt,
+                        history_messages=history_messages,
+                        api_key=api_key,
+                        base_url=host,
+                        **kwargs,
+                    )
+                else:
+                    from lightrag.llm.openai import openai_complete_if_cache
+
+                    return await openai_complete_if_cache(
+                        model,
+                        prompt,
+                        system_prompt=system_prompt,
+                        history_messages=history_messages,
+                        base_url=host,
+                        api_key=api_key,
+                        **kwargs,
+                    )
+
+        return vision_model_complete
 
     def create_optimized_embedding_function(
         config_cache: LLMConfigCache, binding, model, host, api_key, args
@@ -1087,15 +1260,60 @@ def create_app(args):
         logger.error(f"Failed to initialize LightRAG: {e}")
         raise
 
+    # Initialize RAGAnything for multimodal support (optional)
+    rag_anything = None
+    if args.enable_multimodal:
+        try:
+            from raganything import RAGAnything
+
+            # Resolve VLM configuration with fallbacks to LLM settings
+            vlm_binding = args.vlm_binding or args.llm_binding
+            vlm_model = args.vlm_model
+            vlm_host = args.vlm_binding_host or args.llm_binding_host
+            vlm_api_key = args.vlm_binding_api_key or args.llm_binding_api_key
+
+            vision_func = create_vision_model_func(
+                binding=vlm_binding,
+                model=vlm_model,
+                host=vlm_host,
+                api_key=vlm_api_key,
+                llm_timeout=llm_timeout,
+            )
+
+            rag_anything = RAGAnything(
+                lightrag=rag,
+                vision_model_func=vision_func,
+            )
+
+            # Create multimodal output directory
+            Path(args.multimodal_output_dir).mkdir(parents=True, exist_ok=True)
+
+            logger.info(
+                f"Multimodal support enabled: VLM binding={vlm_binding}, "
+                f"model={vlm_model}, host={vlm_host}"
+            )
+        except ImportError:
+            logger.warning(
+                "ENABLE_MULTIMODAL is true but 'raganything' package is not installed. "
+                "Install it with: pip install raganything[all]"
+            )
+            logger.warning("Continuing without multimodal support.")
+        except Exception as e:
+            logger.error(f"Failed to initialize RAGAnything: {e}")
+            logger.warning("Continuing without multimodal support.")
+
     # Add routes
     app.include_router(
         create_document_routes(
             rag,
             doc_manager,
             api_key,
+            rag_anything=rag_anything,
         )
     )
-    app.include_router(create_query_routes(rag, api_key, args.top_k))
+    app.include_router(
+        create_query_routes(rag, api_key, args.top_k, rag_anything=rag_anything)
+    )
     app.include_router(create_graph_routes(rag, api_key))
 
     # Add Ollama API routes
