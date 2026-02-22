@@ -1,21 +1,44 @@
 services:
-  lightrag:
-    container_name: lightrag
-    image: ghcr.io/hkuds/lightrag:latest
+  mongodb:
+    image: mongodb/mongodb-community-server:5.0-ubuntu2004
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: always
+    container_name: qdrant
+    ports:
+      - 6333:6333
+      - 6334:6334
+    expose:
+      - 6333
+      - 6334
+      - 6335
+    volumes:
+      - qdrant_data:/qdrant/storage
+  lightrag-raganything:
+    container_name: lightrag-raganything
+    image: lightrag 
+    entrypoint: ["lightrag-gunicorn"]
     build:
       context: .
       dockerfile: Dockerfile
       tags:
-        - ghcr.io/hkuds/lightrag:latest
+        - raganything
     ports:
-      - "${PORT:-9621}:9621"
+      - "9630:9621"
     volumes:
       - ./data/rag_storage:/app/data/rag_storage
       - ./data/inputs:/app/data/inputs
-      - ./config.ini:/app/config.ini
-      - ./.env:/app/.env
     env_file:
-      - .env
+      - .env-raganything
     restart: unless-stopped
+    depends_on:
+      - mongodb
+      - qdrant
     extra_hosts:
       - "host.docker.internal:host-gateway"
+volumes:
+  mongo_data:
+  qdrant_data:
