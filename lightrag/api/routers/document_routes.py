@@ -1210,6 +1210,52 @@ def _extract_xlsx(file_bytes: bytes) -> str:
     return "\n".join(content_parts)
 
 
+async def _register_multimodal_doc_status(
+    rag: LightRAG,
+    file_path: Path,
+    track_id: str,
+    file_size: int,
+    status: DocStatus,
+) -> str:
+    """Register or update a multimodal document in doc_status tracking.
+
+    Returns the generated doc_id for subsequent updates.
+    """
+    doc_content = f"[Multimodal Document] {file_path.name}"
+    doc_id = compute_mdhash_id(doc_content, prefix="doc-")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    doc_status_data = {
+        doc_id: {
+            "content_summary": doc_content,
+            "content_length": file_size,
+            "status": status,
+            "file_path": str(file_path.name),
+            "track_id": track_id,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+    }
+    await rag.doc_status.upsert(doc_status_data)
+    return doc_id
+
+
+async def _move_to_enqueued(file_path: Path) -> None:
+    """Move a processed file to the __enqueued__ directory."""
+    try:
+        enqueued_dir = file_path.parent / "__enqueued__"
+        enqueued_dir.mkdir(exist_ok=True)
+        unique_filename = get_unique_filename_in_enqueued(enqueued_dir, file_path.name)
+        target_path = enqueued_dir / unique_filename
+        file_path.rename(target_path)
+        logger.debug(
+            f"Moved file to enqueued directory: {file_path.name} -> {unique_filename}"
+        )
+    except Exception as move_error:
+        logger.error(
+            f"Failed to move file {file_path.name} to __enqueued__ directory: {move_error}"
+        )
+
+
 async def pipeline_enqueue_file(
     rag: LightRAG, file_path: Path, track_id: str = None, rag_anything=None
 ) -> tuple[bool, str]:
@@ -1385,15 +1431,30 @@ async def pipeline_enqueue_file(
                 case ".pdf":
                     try:
                         if rag_anything is not None:
+                            # Register as PROCESSING immediately so the UI shows progress
+                            doc_id = await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.PROCESSING
+                            )
+                            logger.info(
+                                f"[Multimodal]Processing PDF via RAGAnything: {file_path.name}"
+                            )
+
                             # Use RAGAnything for multimodal PDF processing
                             # (extracts text, images, tables, equations via MinerU)
                             await rag_anything.process_document_complete(
                                 file_path=str(file_path)
                             )
+
+                            # Update status to PROCESSED after completion
+                            await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.PROCESSED
+                            )
                             logger.info(
                                 f"[Multimodal]Successfully processed PDF: {file_path.name}"
                             )
-                            content = f"[Multimodal Document] {file_path.name} - processed via RAGAnything"
+
+                            await _move_to_enqueued(file_path)
+                            return True, track_id
                         elif (
                             global_args.document_loading_engine == "DOCLING"
                             and _is_docling_available()
@@ -1435,14 +1496,28 @@ async def pipeline_enqueue_file(
                 case ".docx":
                     try:
                         if rag_anything is not None:
-                            # Use RAGAnything for multimodal DOCX processing
+                            # Register as PROCESSING immediately so the UI shows progress
+                            doc_id = await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.PROCESSING
+                            )
+                            logger.info(
+                                f"[Multimodal]Processing DOCX via RAGAnything: {file_path.name}"
+                            )
+
                             await rag_anything.process_document_complete(
                                 file_path=str(file_path)
+                            )
+
+                            # Update status to PROCESSED after completion
+                            await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.PROCESSED
                             )
                             logger.info(
                                 f"[Multimodal]Successfully processed DOCX: {file_path.name}"
                             )
-                            content = f"[Multimodal Document] {file_path.name} - processed via RAGAnything"
+
+                            await _move_to_enqueued(file_path)
+                            return True, track_id
                         elif (
                             global_args.document_loading_engine == "DOCLING"
                             and _is_docling_available()
@@ -1480,14 +1555,28 @@ async def pipeline_enqueue_file(
                 case ".pptx":
                     try:
                         if rag_anything is not None:
-                            # Use RAGAnything for multimodal PPTX processing
+                            # Register as PROCESSING immediately so the UI shows progress
+                            doc_id = await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.PROCESSING
+                            )
+                            logger.info(
+                                f"[Multimodal]Processing PPTX via RAGAnything: {file_path.name}"
+                            )
+
                             await rag_anything.process_document_complete(
                                 file_path=str(file_path)
+                            )
+
+                            # Update status to PROCESSED after completion
+                            await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.PROCESSED
                             )
                             logger.info(
                                 f"[Multimodal]Successfully processed PPTX: {file_path.name}"
                             )
-                            content = f"[Multimodal Document] {file_path.name} - processed via RAGAnything"
+
+                            await _move_to_enqueued(file_path)
+                            return True, track_id
                         elif (
                             global_args.document_loading_engine == "DOCLING"
                             and _is_docling_available()
@@ -1525,14 +1614,28 @@ async def pipeline_enqueue_file(
                 case ".xlsx":
                     try:
                         if rag_anything is not None:
-                            # Use RAGAnything for multimodal XLSX processing
+                            # Register as PROCESSING immediately so the UI shows progress
+                            doc_id = await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.PROCESSING
+                            )
+                            logger.info(
+                                f"[Multimodal]Processing XLSX via RAGAnything: {file_path.name}"
+                            )
+
                             await rag_anything.process_document_complete(
                                 file_path=str(file_path)
+                            )
+
+                            # Update status to PROCESSED after completion
+                            await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.PROCESSED
                             )
                             logger.info(
                                 f"[Multimodal]Successfully processed XLSX: {file_path.name}"
                             )
-                            content = f"[Multimodal Document] {file_path.name} - processed via RAGAnything"
+
+                            await _move_to_enqueued(file_path)
+                            return True, track_id
                         elif (
                             global_args.document_loading_engine == "DOCLING"
                             and _is_docling_available()
@@ -1587,19 +1690,29 @@ async def pipeline_enqueue_file(
                         return False, track_id
 
                     try:
+                        # Register as PROCESSING immediately so the UI shows progress
+                        doc_id = await _register_multimodal_doc_status(
+                            rag, file_path, track_id, file_size, DocStatus.PROCESSING
+                        )
+                        logger.info(
+                            f"[Multimodal]Processing image via RAGAnything: {file_path.name}"
+                        )
+
                         # Use RAGAnything's process_document_complete to process the image.
-                        # This public API handles image parsing, multimodal content
-                        # extraction, and storage internally.
                         await rag_anything.process_document_complete(
                             file_path=str(file_path),
                         )
 
+                        # Update status to PROCESSED after completion
+                        await _register_multimodal_doc_status(
+                            rag, file_path, track_id, file_size, DocStatus.PROCESSED
+                        )
                         logger.info(
                             f"[Multimodal]Successfully processed image: {file_path.name}"
                         )
-                        # For images processed via RAGAnything, we still need to
-                        # register them in the document pipeline for tracking
-                        content = f"[Multimodal Image] {file_path.name} - processed via RAGAnything"
+
+                        await _move_to_enqueued(file_path)
+                        return True, track_id
 
                     except Exception as e:
                         error_files = [
