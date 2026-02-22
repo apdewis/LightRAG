@@ -1384,8 +1384,17 @@ async def pipeline_enqueue_file(
 
                 case ".pdf":
                     try:
-                        # Try DOCLING first if configured and available
-                        if (
+                        if rag_anything is not None:
+                            # Use RAGAnything for multimodal PDF processing
+                            # (extracts text, images, tables, equations via MinerU)
+                            await rag_anything.process_document_complete(
+                                file_path=str(file_path)
+                            )
+                            logger.info(
+                                f"[Multimodal]Successfully processed PDF: {file_path.name}"
+                            )
+                            content = f"[Multimodal Document] {file_path.name} - processed via RAGAnything"
+                        elif (
                             global_args.document_loading_engine == "DOCLING"
                             and _is_docling_available()
                         ):
@@ -1425,8 +1434,16 @@ async def pipeline_enqueue_file(
 
                 case ".docx":
                     try:
-                        # Try DOCLING first if configured and available
-                        if (
+                        if rag_anything is not None:
+                            # Use RAGAnything for multimodal DOCX processing
+                            await rag_anything.process_document_complete(
+                                file_path=str(file_path)
+                            )
+                            logger.info(
+                                f"[Multimodal]Successfully processed DOCX: {file_path.name}"
+                            )
+                            content = f"[Multimodal Document] {file_path.name} - processed via RAGAnything"
+                        elif (
                             global_args.document_loading_engine == "DOCLING"
                             and _is_docling_available()
                         ):
@@ -1462,8 +1479,16 @@ async def pipeline_enqueue_file(
 
                 case ".pptx":
                     try:
-                        # Try DOCLING first if configured and available
-                        if (
+                        if rag_anything is not None:
+                            # Use RAGAnything for multimodal PPTX processing
+                            await rag_anything.process_document_complete(
+                                file_path=str(file_path)
+                            )
+                            logger.info(
+                                f"[Multimodal]Successfully processed PPTX: {file_path.name}"
+                            )
+                            content = f"[Multimodal Document] {file_path.name} - processed via RAGAnything"
+                        elif (
                             global_args.document_loading_engine == "DOCLING"
                             and _is_docling_available()
                         ):
@@ -1499,8 +1524,16 @@ async def pipeline_enqueue_file(
 
                 case ".xlsx":
                     try:
-                        # Try DOCLING first if configured and available
-                        if (
+                        if rag_anything is not None:
+                            # Use RAGAnything for multimodal XLSX processing
+                            await rag_anything.process_document_complete(
+                                file_path=str(file_path)
+                            )
+                            logger.info(
+                                f"[Multimodal]Successfully processed XLSX: {file_path.name}"
+                            )
+                            content = f"[Multimodal Document] {file_path.name} - processed via RAGAnything"
+                        elif (
                             global_args.document_loading_engine == "DOCLING"
                             and _is_docling_available()
                         ):
