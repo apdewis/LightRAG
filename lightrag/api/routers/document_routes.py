@@ -1239,6 +1239,29 @@ async def _register_multimodal_doc_status(
     return doc_id
 
 
+async def _update_multimodal_pipeline_status(
+    rag: LightRAG, message: str, busy: bool = True, job_name: str = "multimodal processing"
+) -> None:
+    """Update pipeline status to reflect multimodal/MinerU processing activity."""
+    from lightrag.kg.shared_storage import get_namespace_data, get_namespace_lock
+
+    pipeline_status = await get_namespace_data(
+        "pipeline_status", workspace=rag.workspace
+    )
+    pipeline_status_lock = get_namespace_lock(
+        "pipeline_status", workspace=rag.workspace
+    )
+    async with pipeline_status_lock:
+        pipeline_status["busy"] = busy
+        pipeline_status["job_name"] = job_name
+        pipeline_status["latest_message"] = message
+        if "history_messages" not in pipeline_status:
+            pipeline_status["history_messages"] = []
+        pipeline_status["history_messages"].append(message)
+        if busy:
+            pipeline_status["job_start"] = datetime.now(timezone.utc).isoformat()
+
+
 async def _move_to_enqueued(file_path: Path) -> None:
     """Move a processed file to the __enqueued__ directory."""
     try:
@@ -1435,8 +1458,10 @@ async def pipeline_enqueue_file(
                             doc_id = await _register_multimodal_doc_status(
                                 rag, file_path, track_id, file_size, DocStatus.PROCESSING
                             )
-                            logger.info(
-                                f"[Multimodal]Processing PDF via RAGAnything: {file_path.name}"
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Parsing multimodal PDF: {file_path.name}",
+                                busy=True,
                             )
 
                             # Use RAGAnything for multimodal PDF processing
@@ -1448,6 +1473,11 @@ async def pipeline_enqueue_file(
                             # Update status to PROCESSED after completion
                             await _register_multimodal_doc_status(
                                 rag, file_path, track_id, file_size, DocStatus.PROCESSED
+                            )
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Completed multimodal PDF: {file_path.name}",
+                                busy=False,
                             )
                             logger.info(
                                 f"[Multimodal]Successfully processed PDF: {file_path.name}"
@@ -1500,8 +1530,10 @@ async def pipeline_enqueue_file(
                             doc_id = await _register_multimodal_doc_status(
                                 rag, file_path, track_id, file_size, DocStatus.PROCESSING
                             )
-                            logger.info(
-                                f"[Multimodal]Processing DOCX via RAGAnything: {file_path.name}"
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Parsing multimodal DOCX: {file_path.name}",
+                                busy=True,
                             )
 
                             await rag_anything.process_document_complete(
@@ -1511,6 +1543,11 @@ async def pipeline_enqueue_file(
                             # Update status to PROCESSED after completion
                             await _register_multimodal_doc_status(
                                 rag, file_path, track_id, file_size, DocStatus.PROCESSED
+                            )
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Completed multimodal DOCX: {file_path.name}",
+                                busy=False,
                             )
                             logger.info(
                                 f"[Multimodal]Successfully processed DOCX: {file_path.name}"
@@ -1559,8 +1596,10 @@ async def pipeline_enqueue_file(
                             doc_id = await _register_multimodal_doc_status(
                                 rag, file_path, track_id, file_size, DocStatus.PROCESSING
                             )
-                            logger.info(
-                                f"[Multimodal]Processing PPTX via RAGAnything: {file_path.name}"
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Parsing multimodal PPTX: {file_path.name}",
+                                busy=True,
                             )
 
                             await rag_anything.process_document_complete(
@@ -1570,6 +1609,11 @@ async def pipeline_enqueue_file(
                             # Update status to PROCESSED after completion
                             await _register_multimodal_doc_status(
                                 rag, file_path, track_id, file_size, DocStatus.PROCESSED
+                            )
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Completed multimodal PPTX: {file_path.name}",
+                                busy=False,
                             )
                             logger.info(
                                 f"[Multimodal]Successfully processed PPTX: {file_path.name}"
@@ -1618,8 +1662,10 @@ async def pipeline_enqueue_file(
                             doc_id = await _register_multimodal_doc_status(
                                 rag, file_path, track_id, file_size, DocStatus.PROCESSING
                             )
-                            logger.info(
-                                f"[Multimodal]Processing XLSX via RAGAnything: {file_path.name}"
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Parsing multimodal XLSX: {file_path.name}",
+                                busy=True,
                             )
 
                             await rag_anything.process_document_complete(
@@ -1629,6 +1675,11 @@ async def pipeline_enqueue_file(
                             # Update status to PROCESSED after completion
                             await _register_multimodal_doc_status(
                                 rag, file_path, track_id, file_size, DocStatus.PROCESSED
+                            )
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Completed multimodal XLSX: {file_path.name}",
+                                busy=False,
                             )
                             logger.info(
                                 f"[Multimodal]Successfully processed XLSX: {file_path.name}"
@@ -1694,8 +1745,10 @@ async def pipeline_enqueue_file(
                         doc_id = await _register_multimodal_doc_status(
                             rag, file_path, track_id, file_size, DocStatus.PROCESSING
                         )
-                        logger.info(
-                            f"[Multimodal]Processing image via RAGAnything: {file_path.name}"
+                        await _update_multimodal_pipeline_status(
+                            rag,
+                            f"[MinerU] Parsing multimodal image: {file_path.name}",
+                            busy=True,
                         )
 
                         # Use RAGAnything's process_document_complete to process the image.
@@ -1706,6 +1759,11 @@ async def pipeline_enqueue_file(
                         # Update status to PROCESSED after completion
                         await _register_multimodal_doc_status(
                             rag, file_path, track_id, file_size, DocStatus.PROCESSED
+                        )
+                        await _update_multimodal_pipeline_status(
+                            rag,
+                            f"[MinerU] Completed multimodal image: {file_path.name}",
+                            busy=False,
                         )
                         logger.info(
                             f"[Multimodal]Successfully processed image: {file_path.name}"
