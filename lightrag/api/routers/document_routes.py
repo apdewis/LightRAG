@@ -1554,36 +1554,11 @@ async def pipeline_enqueue_file(
                         return False, track_id
 
                     try:
-                        # Use RAGAnything to process the image
-                        import base64
-
-                        image_base64 = base64.b64encode(file).decode("utf-8")
-
-                        # Determine MIME type from extension
-                        mime_types = {
-                            ".png": "image/png",
-                            ".jpg": "image/jpeg",
-                            ".jpeg": "image/jpeg",
-                            ".gif": "image/gif",
-                            ".bmp": "image/bmp",
-                            ".webp": "image/webp",
-                            ".svg": "image/svg+xml",
-                        }
-                        mime_type = mime_types.get(ext, "image/png")
-
-                        # Process via RAGAnything's multimodal content processing
-                        multimodal_content = [
-                            {
-                                "type": "image",
-                                "image_data": image_base64,
-                                "mime_type": mime_type,
-                                "image_caption": f"Uploaded image: {file_path.name}",
-                            }
-                        ]
-
-                        await rag_anything.process_multimodal_content(
-                            multimodal_content=multimodal_content,
-                            text_content=f"Image file: {file_path.name}",
+                        # Use RAGAnything's process_document_complete to process the image.
+                        # This public API handles image parsing, multimodal content
+                        # extraction, and storage internally.
+                        await rag_anything.process_document_complete(
+                            file_path=str(file_path),
                         )
 
                         logger.info(
