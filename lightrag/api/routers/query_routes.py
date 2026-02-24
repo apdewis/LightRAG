@@ -443,7 +443,27 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
                     detail="Multimodal queries require ENABLE_MULTIMODAL=true on the server and raganything package installed.",
                 )
 
-            # Standard text-only query path (existing code unchanged)
+            # When rag_anything is available, route ALL queries through it
+            # so multimodal content (images, tables, equations) is included
+            if rag_anything is not None:
+                try:
+                    result = await rag_anything.aquery(
+                        request.query,
+                        mode=request.mode,
+                    )
+                    # rag_anything.aquery() returns a string response
+                    if request.include_references:
+                        return QueryResponse(
+                            response=result, references=[]
+                        )
+                    return QueryResponse(response=result, references=None)
+                except Exception as e:
+                    logger.warning(
+                        f"RAGAnything query failed, falling back to standard query: {e}"
+                    )
+                    # Fall through to standard query path below
+
+            # Standard text-only query path (fallback when rag_anything is None or fails)
             param = request.to_query_params(
                 False
             )  # Ensure stream=False for non-streaming endpoint
@@ -734,7 +754,36 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
                     detail="Multimodal queries require ENABLE_MULTIMODAL=true on the server and raganything package installed.",
                 )
 
-            # Standard text-only query path (existing code unchanged)
+            # When rag_anything is available, route ALL queries through it
+            # so multimodal content (images, tables, equations) is included
+            if rag_anything is not None:
+                try:
+                    result = await rag_anything.aquery(
+                        request.query,
+                        mode=request.mode,
+                    )
+
+                    # Wrap string result in streaming format
+                    async def rag_anything_stream():
+                        if request.include_references:
+                            yield json.dumps({"references": []}) + "\n"
+                        yield json.dumps({"response": result}) + "\n"
+
+                    from fastapi.responses import (
+                        StreamingResponse as _RAStreamingResponse,
+                    )
+
+                    return _RAStreamingResponse(
+                        rag_anything_stream(),
+                        media_type="application/x-ndjson",
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"RAGAnything query failed, falling back to standard query: {e}"
+                    )
+                    # Fall through to standard query path below
+
+            # Standard text-only query path (fallback when rag_anything is None or fails)
             # Use the stream parameter from the request, defaulting to True if not specified
             stream_mode = request.stream if request.stream is not None else True
             param = request.to_query_params(stream_mode)
