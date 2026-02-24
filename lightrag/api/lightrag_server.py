@@ -1312,7 +1312,17 @@ def create_app(args):
         )
     )
     app.include_router(
-        create_query_routes(rag, api_key, args.top_k, rag_anything=rag_anything)
+        create_query_routes(
+            rag,
+            api_key,
+            args.top_k,
+            rag_anything=rag_anything,
+            multimodal_output_dir=(
+                str(Path(args.multimodal_output_dir).resolve())
+                if args.enable_multimodal
+                else None
+            ),
+        )
     )
     app.include_router(create_graph_routes(rag, api_key))
 

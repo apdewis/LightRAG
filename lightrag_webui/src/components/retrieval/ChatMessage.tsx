@@ -129,6 +129,26 @@ export const ChatMessage = ({
         </CodeHighlight>
       );
     },
+    img: ({ src, alt, ...props }: any) => (
+      <figure className="my-4">
+        <img
+          src={src}
+          alt={alt || ''}
+          className="max-w-full h-auto rounded-lg shadow-sm border border-border"
+          loading="lazy"
+          onError={(e) => {
+            const target = e.target as HTMLImageElement
+            target.style.display = 'none'
+          }}
+          {...props}
+        />
+        {alt && (
+          <figcaption className="text-xs text-muted-foreground mt-1 text-center">
+            {alt}
+          </figcaption>
+        )}
+      </figure>
+    ),
     p: ({ children }: { children?: ReactNode }) => <div className="my-2">{children}</div>,
     h1: ({ children }: { children?: ReactNode }) => <h1 className="text-xl font-bold mt-4 mb-2">{children}</h1>,
     h2: ({ children }: { children?: ReactNode }) => <h2 className="text-lg font-bold mt-4 mb-2">{children}</h2>,

@@ -3,11 +3,17 @@ This module contains all query-related routes for the LightRAG API.
 """
 
 import json
+import mimetypes
+import re
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
-from lightrag.base import QueryParam
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import Query as QueryParam_
+from fastapi.responses import FileResponse, JSONResponse
+from lightrag.api.auth import auth_handler
 from lightrag.api.utils_api import get_combined_auth_dependency
+from lightrag.base import QueryParam
 from lightrag.utils import logger
 from pydantic import BaseModel, Field, field_validator
 
@@ -202,8 +208,252 @@ class StreamChunkResponse(BaseModel):
     )
 
 
-def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag_anything=None):
+# Image extensions recognised when rewriting multimodal asset paths
+_IMAGE_EXTENSIONS = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
+)
+
+# Build a regex alternation for image extensions (escaped dots)
+_IMG_EXT_PATTERN = "|".join(re.escape(ext) for ext in _IMAGE_EXTENSIONS)
+
+
+def _rewrite_image_paths(
+    response: str,
+    multimodal_output_dir: str,
+    auth_token: Optional[str] = None,
+) -> str:
+    """Rewrite local image file paths in LLM responses to API-served URLs.
+
+    Handles five patterns:
+    0. HTML ``<img>`` tags: ``<img src="local/path/to/image.png" ...>``
+    1. Markdown image syntax: ``![alt](local/path/to/image.png)``
+    2. Plain-text "Image Path:" references followed by a file path
+    3. Backtick-wrapped paths: ```/output/doc/images/fig.png```
+    4. Bare absolute/relative file paths ending with an image extension
+
+    All matching paths that resolve inside *multimodal_output_dir* are converted
+    to ``/multimodal-assets/relative/path.png?token=…`` URLs.
+    """
+    if not multimodal_output_dir:
+        return response
+
+    output_dir = Path(multimodal_output_dir).resolve()
+
+    def _try_resolve(raw_path: str) -> Optional[str]:
+        """Return the URL-safe relative path if *raw_path* lives inside *output_dir*."""
+        raw_path = raw_path.strip()
+        candidates = [Path(raw_path)]
+        # Also try interpreting as relative to CWD
+        candidates.append(Path.cwd() / raw_path)
+        # Also try interpreting as relative to output_dir itself
+        candidates.append(output_dir / raw_path)
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+                relative = resolved.relative_to(output_dir)
+                if resolved.suffix.lower() in _IMAGE_EXTENSIONS:
+                    return str(relative)
+            except (ValueError, OSError):
+                continue
+        return None
+
+    def _make_url(relative: str) -> str:
+        url = f"/multimodal-assets/{relative}"
+        if auth_token:
+            url += f"?token={auth_token}"
+        return url
+
+    # --- Pass 0: rewrite HTML <img> tags ---
+    def _replace_html_img(match: re.Match) -> str:
+        prefix = match.group(1)  # everything before src value
+        raw_path = match.group(2)
+        suffix = match.group(3)  # everything after src value
+        relative = _try_resolve(raw_path)
+        if relative is None:
+            return match.group(0)
+        url = _make_url(relative)
+        # Convert to markdown image for consistent rendering
+        return f"![image]({url})"
+
+    response = re.sub(
+        r'<img\s([^>]*?)src=["\']([^"\']+)["\']([^>]*)\/?>',
+        _replace_html_img,
+        response,
+        flags=re.IGNORECASE,
+    )
+
+    # --- Pass 1: rewrite existing markdown images ![alt](path) ---
+    def _replace_md_image(match: re.Match) -> str:
+        alt_text = match.group(1)
+        raw_path = match.group(2)
+        relative = _try_resolve(raw_path)
+        if relative is None:
+            return match.group(0)
+        return f"![{alt_text}]({_make_url(relative)})"
+
+    response = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", _replace_md_image, response)
+
+    # --- Pass 2: convert "Image Path: <path>" text references into markdown images ---
+    # Captures patterns like:
+    #   Image Path: /app/output/doc/auto/images/abc123.jpg
+    #   image path: ./multimodal_output/doc/images/fig.png
+    def _replace_image_path_label(match: re.Match) -> str:
+        raw_path = match.group(1).strip()
+        relative = _try_resolve(raw_path)
+        if relative is None:
+            return match.group(0)
+        url = _make_url(relative)
+        # Try to find a "Description:" line immediately after for alt text
+        return f"\n![image]({url})\n"
+
+    response = re.sub(
+        r"[Ii]mage\s+[Pp]ath:\s*([^\s\n]+(?:" + _IMG_EXT_PATTERN + r"))",
+        _replace_image_path_label,
+        response,
+    )
+
+    # --- Pass 3: convert backtick-wrapped image paths ---
+    # Handles patterns like:
+    #   `/app/output/doc/auto/images/abc123.jpg`
+    #   `./output/doc/images/fig.png`
+    def _replace_backtick_path(match: re.Match) -> str:
+        raw_path = match.group(1)
+        # Skip if already converted to a URL
+        if raw_path.startswith("/multimodal-assets/"):
+            return match.group(0)
+        relative = _try_resolve(raw_path)
+        if relative is None:
+            return match.group(0)
+        url = _make_url(relative)
+        return f"\n![image]({url})\n"
+
+    response = re.sub(
+        r"`((?:/|\.{1,2}/)[^`\s]+(?:" + _IMG_EXT_PATTERN + r"))`",
+        _replace_backtick_path,
+        response,
+    )
+
+    # --- Pass 4: convert remaining bare image paths that weren't already handled ---
+    # Match absolute or relative paths ending with image extensions that aren't
+    # already inside markdown image syntax or URLs
+    def _replace_bare_path(match: re.Match) -> str:
+        raw_path = match.group(0)
+        # Skip if already inside markdown image syntax (preceded by ]( )
+        start = match.start()
+        if start >= 2 and response[start - 2 : start] == "](":
+            return raw_path
+        # Skip if already converted to a URL
+        if raw_path.startswith("/multimodal-assets/"):
+            return raw_path
+        relative = _try_resolve(raw_path)
+        if relative is None:
+            return raw_path
+        url = _make_url(relative)
+        return f"\n![image]({url})\n"
+
+    response = re.sub(
+        r"(?:^|(?<=\s))(?:/[^\s]+|\.{1,2}/[^\s]+)(?:" + _IMG_EXT_PATTERN + r")",
+        _replace_bare_path,
+        response,
+    )
+
+    return response
+
+
+def _extract_bearer_token(request: Request) -> Optional[str]:
+    """Extract the Bearer token from an incoming request's Authorization header."""
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:]
+    return None
+
+
+def create_query_routes(
+    rag,
+    api_key: Optional[str] = None,
+    top_k: int = 60,
+    rag_anything=None,
+    multimodal_output_dir: Optional[str] = None,
+):
     combined_auth = get_combined_auth_dependency(api_key)
+    # Pre-resolve once so every request doesn't repeat the work
+    _resolved_mm_dir = (
+        str(Path(multimodal_output_dir).resolve()) if multimodal_output_dir else None
+    )
+    _api_key_configured = bool(api_key)
+    _auth_configured = bool(auth_handler.accounts)
+
+    # ------------------------------------------------------------------
+    # Authenticated endpoint for serving MinerU-extracted images
+    # ------------------------------------------------------------------
+    if _resolved_mm_dir:
+
+        @router.get(
+            "/multimodal-assets/{file_path:path}",
+            tags=["multimodal"],
+            summary="Serve MinerU-extracted images",
+            responses={
+                200: {"description": "Image file"},
+                401: {"description": "Authentication required or invalid token"},
+                403: {"description": "Access denied (path traversal attempt)"},
+                404: {"description": "File not found"},
+            },
+        )
+        async def serve_multimodal_asset(
+            file_path: str,
+            token: Optional[str] = QueryParam_(
+                None, description="JWT token for authentication"
+            ),
+            api_key_param: Optional[str] = QueryParam_(
+                None,
+                alias="api_key",
+                description="API key for authentication",
+            ),
+        ):
+            """Serve images extracted by MinerU during multimodal document processing.
+
+            Because ``<img>`` tags rendered by the frontend cannot send
+            ``Authorization`` headers, the JWT token (or API key) is passed as a
+            query parameter instead.
+            """
+            # --- Authentication ---
+            authenticated = False
+            if token:
+                try:
+                    token_info = auth_handler.validate_token(token)
+                    # Accept guest tokens when auth is not configured
+                    if not _auth_configured and token_info.get("role") == "guest":
+                        authenticated = True
+                    elif _auth_configured and token_info.get("role") != "guest":
+                        authenticated = True
+                except Exception:
+                    raise HTTPException(
+                        status_code=401, detail="Invalid or expired token"
+                    )
+            if not authenticated and _api_key_configured:
+                if api_key_param and api_key_param == api_key:
+                    authenticated = True
+            if not authenticated and not _auth_configured and not _api_key_configured:
+                authenticated = True
+            if not authenticated:
+                raise HTTPException(
+                    status_code=401, detail="Authentication required"
+                )
+
+            # --- Path validation (prevent directory traversal) ---
+            base_dir = Path(_resolved_mm_dir)
+            requested_file = (base_dir / file_path).resolve()
+            if not str(requested_file).startswith(str(base_dir)):
+                raise HTTPException(status_code=403, detail="Access denied")
+            if not requested_file.is_file():
+                raise HTTPException(status_code=404, detail="File not found")
+
+            content_type, _ = mimetypes.guess_type(str(requested_file))
+            return FileResponse(
+                path=requested_file,
+                media_type=content_type or "application/octet-stream",
+                headers={"Cache-Control": "private, max-age=3600"},
+            )
 
     @router.post(
         "/query",
@@ -334,7 +584,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
             },
         },
     )
-    async def query_text(request: QueryRequest):
+    async def query_text(request: QueryRequest, http_request: Request):
         """
         Comprehensive RAG query endpoint with non-streaming response. Parameter "stream" is ignored.
 
@@ -414,6 +664,9 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
                 - 500: Internal processing error (e.g., LLM service unavailable)
         """
         try:
+            # Extract bearer token for embedding in image URLs
+            _bearer = _extract_bearer_token(http_request) if _resolved_mm_dir else None
+
             # Check if this is a multimodal query
             if request.multimodal_content and rag_anything is not None:
                 try:
@@ -422,6 +675,9 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
                         multimodal_content=request.multimodal_content,
                         mode=request.mode,
                     )
+                    # Rewrite local image paths to served URLs
+                    if _resolved_mm_dir:
+                        result = _rewrite_image_paths(result, _resolved_mm_dir, _bearer)
                     # aquery_with_multimodal returns a string response
                     if request.include_references:
                         return JSONResponse(
@@ -451,6 +707,9 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
                         request.query,
                         mode=request.mode,
                     )
+                    # Rewrite local image paths to served URLs
+                    if _resolved_mm_dir:
+                        result = _rewrite_image_paths(result, _resolved_mm_dir, _bearer)
                     # rag_anything.aquery() returns a string response
                     if request.include_references:
                         return QueryResponse(
@@ -482,6 +741,12 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
             response_content = llm_response.get("content", "")
             if not response_content:
                 response_content = "No relevant context found for the query."
+
+            # Rewrite local image paths to served URLs (applies to all paths)
+            if _resolved_mm_dir:
+                response_content = _rewrite_image_paths(
+                    response_content, _resolved_mm_dir, _bearer
+                )
 
             # Enrich references with chunk content if requested
             if request.include_references and request.include_chunk_content:
@@ -594,7 +859,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
             },
         },
     )
-    async def query_text_stream(request: QueryRequest):
+    async def query_text_stream(request: QueryRequest, http_request: Request):
         """
         Advanced RAG query endpoint with flexible streaming response.
 
@@ -722,6 +987,9 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
             Use streaming mode for real-time interfaces and non-streaming for batch processing.
         """
         try:
+            # Extract bearer token for embedding in image URLs
+            _bearer = _extract_bearer_token(http_request) if _resolved_mm_dir else None
+
             # Check if this is a multimodal query
             if request.multimodal_content and rag_anything is not None:
                 try:
@@ -730,6 +998,9 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
                         multimodal_content=request.multimodal_content,
                         mode=request.mode,
                     )
+                    # Rewrite local image paths to served URLs
+                    if _resolved_mm_dir:
+                        result = _rewrite_image_paths(result, _resolved_mm_dir, _bearer)
                     # Return multimodal result as a single streaming response
                     async def multimodal_stream():
                         if request.include_references:
@@ -762,6 +1033,9 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
                         request.query,
                         mode=request.mode,
                     )
+                    # Rewrite local image paths to served URLs
+                    if _resolved_mm_dir:
+                        result = _rewrite_image_paths(result, _resolved_mm_dir, _bearer)
 
                     # Wrap string result in streaming format
                     async def rag_anything_stream():
@@ -830,9 +1104,24 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
                     response_stream = llm_response.get("response_iterator")
                     if response_stream:
                         try:
-                            async for chunk in response_stream:
-                                if chunk:  # Only send non-empty content
-                                    yield f"{json.dumps({'response': chunk})}\n"
+                            if _resolved_mm_dir:
+                                # When multimodal output dir is configured, we must
+                                # accumulate the full response before rewriting image
+                                # paths because markdown image patterns like
+                                # ![alt](path) are split across streaming chunks.
+                                accumulated = []
+                                async for chunk in response_stream:
+                                    if chunk:
+                                        accumulated.append(chunk)
+                                full_response = "".join(accumulated)
+                                full_response = _rewrite_image_paths(
+                                    full_response, _resolved_mm_dir, _bearer
+                                )
+                                yield f"{json.dumps({'response': full_response})}\n"
+                            else:
+                                async for chunk in response_stream:
+                                    if chunk:  # Only send non-empty content
+                                        yield f"{json.dumps({'response': chunk})}\n"
                         except Exception as e:
                             logger.error(f"Streaming error: {str(e)}")
                             yield f"{json.dumps({'error': str(e)})}\n"
@@ -841,6 +1130,12 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
                     response_content = llm_response.get("content", "")
                     if not response_content:
                         response_content = "No relevant context found for the query."
+
+                    # Rewrite local image paths to served URLs
+                    if _resolved_mm_dir:
+                        response_content = _rewrite_image_paths(
+                            response_content, _resolved_mm_dir, _bearer
+                        )
 
                     # Create complete response object
                     complete_response = {"response": response_content}

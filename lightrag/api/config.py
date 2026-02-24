@@ -295,8 +295,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--multimodal-output-dir",
-        default=get_env_value("MULTIMODAL_OUTPUT_DIR", "./multimodal_output"),
-        help="Output directory for multimodal processing artifacts (default: from env or ./multimodal_output)",
+        default=get_env_value("MULTIMODAL_OUTPUT_DIR", "./output"),
+        help="Output directory for multimodal processing artifacts (default: from env or ./output)",
     )
 
     # Conditionally add binding-specific options (Ollama, OpenAI, Azure OpenAI, Gemini)
