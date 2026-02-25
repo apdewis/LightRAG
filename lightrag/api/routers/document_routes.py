@@ -1507,6 +1507,16 @@ async def pipeline_enqueue_file(
                                 global_args.pdf_decrypt_password,
                             )
                     except Exception as e:
+                        # Reset multimodal pipeline busy flag if rag_anything was used
+                        if rag_anything is not None:
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Failed multimodal PDF: {file_path.name}: {e}",
+                                busy=False,
+                            )
+                            await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.FAILED
+                            )
                         error_files = [
                             {
                                 "file_path": str(file_path.name),
@@ -1573,6 +1583,16 @@ async def pipeline_enqueue_file(
                             # Use python-docx (non-blocking via to_thread)
                             content = await asyncio.to_thread(_extract_docx, file)
                     except Exception as e:
+                        # Reset multimodal pipeline busy flag if rag_anything was used
+                        if rag_anything is not None:
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Failed multimodal DOCX: {file_path.name}: {e}",
+                                busy=False,
+                            )
+                            await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.FAILED
+                            )
                         error_files = [
                             {
                                 "file_path": str(file_path.name),
@@ -1639,6 +1659,16 @@ async def pipeline_enqueue_file(
                             # Use python-pptx (non-blocking via to_thread)
                             content = await asyncio.to_thread(_extract_pptx, file)
                     except Exception as e:
+                        # Reset multimodal pipeline busy flag if rag_anything was used
+                        if rag_anything is not None:
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Failed multimodal PPTX: {file_path.name}: {e}",
+                                busy=False,
+                            )
+                            await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.FAILED
+                            )
                         error_files = [
                             {
                                 "file_path": str(file_path.name),
@@ -1705,6 +1735,16 @@ async def pipeline_enqueue_file(
                             # Use openpyxl (non-blocking via to_thread)
                             content = await asyncio.to_thread(_extract_xlsx, file)
                     except Exception as e:
+                        # Reset multimodal pipeline busy flag if rag_anything was used
+                        if rag_anything is not None:
+                            await _update_multimodal_pipeline_status(
+                                rag,
+                                f"[MinerU] Failed multimodal XLSX: {file_path.name}: {e}",
+                                busy=False,
+                            )
+                            await _register_multimodal_doc_status(
+                                rag, file_path, track_id, file_size, DocStatus.FAILED
+                            )
                         error_files = [
                             {
                                 "file_path": str(file_path.name),
@@ -1773,6 +1813,15 @@ async def pipeline_enqueue_file(
                         return True, track_id
 
                     except Exception as e:
+                        # Reset multimodal pipeline busy flag on image processing error
+                        await _update_multimodal_pipeline_status(
+                            rag,
+                            f"[MinerU] Failed multimodal image: {file_path.name}: {e}",
+                            busy=False,
+                        )
+                        await _register_multimodal_doc_status(
+                            rag, file_path, track_id, file_size, DocStatus.FAILED
+                        )
                         error_files = [
                             {
                                 "file_path": str(file_path.name),
@@ -1806,6 +1855,16 @@ async def pipeline_enqueue_file(
                     return False, track_id
 
         except Exception as e:
+            # Safety net: reset multimodal pipeline busy flag if it was set
+            if rag_anything is not None:
+                try:
+                    await _update_multimodal_pipeline_status(
+                        rag,
+                        f"[MinerU] Failed processing: {file_path.name}: {e}",
+                        busy=False,
+                    )
+                except Exception:
+                    pass  # Best-effort cleanup
             error_files = [
                 {
                     "file_path": str(file_path.name),
@@ -1899,6 +1958,17 @@ async def pipeline_enqueue_file(
 
     except Exception as e:
         # Catch-all for any unexpected errors
+        # Safety net: reset multimodal pipeline busy flag if it was set
+        if rag_anything is not None:
+            try:
+                await _update_multimodal_pipeline_status(
+                    rag,
+                    f"[MinerU] Unexpected failure: {file_path.name}: {e}",
+                    busy=False,
+                )
+            except Exception:
+                pass  # Best-effort cleanup
+
         try:
             file_size = file_path.stat().st_size if file_path.exists() else 0
         except Exception:
@@ -2032,38 +2102,48 @@ async def run_scanning_process(
         logger.info(f"Found {total_files} files to index.")
 
         if new_files:
-            # Check for files with PROCESSED status and filter them out
+            # Check for files with any existing doc_status and filter them out
+            # to prevent duplicate jobs on rescan
             valid_files = []
-            processed_files = []
+            skipped_files = []
 
             for file_path in new_files:
                 filename = file_path.name
                 existing_doc_data = await rag.doc_status.get_doc_by_file_path(filename)
 
-                if existing_doc_data and existing_doc_data.get("status") == "processed":
-                    # File is already PROCESSED, skip it with warning
-                    processed_files.append(filename)
-                    logger.warning(f"Skipping already processed file: {filename}")
+                if existing_doc_data:
+                    # File already has a doc_status entry (processed, processing,
+                    # pending, or failed) — skip to avoid duplicate jobs
+                    existing_status = existing_doc_data.get("status", "unknown")
+                    skipped_files.append(filename)
+                    logger.info(
+                        f"Skipping file with existing status '{existing_status}': {filename}"
+                    )
+                    # Mark as indexed so scan_directory_for_new_files won't return it again
+                    doc_manager.mark_as_indexed(file_path)
                 else:
-                    # File is new or in non-PROCESSED status, add to processing list
+                    # File is genuinely new, add to processing list
                     valid_files.append(file_path)
 
-            # Process valid files (new files + non-PROCESSED status files)
+            # Process valid files (only genuinely new files)
             if valid_files:
                 await pipeline_index_files(
                     rag, valid_files, track_id, rag_anything=rag_anything
                 )
-                if processed_files:
+                # Mark successfully submitted files as indexed
+                for file_path in valid_files:
+                    doc_manager.mark_as_indexed(file_path)
+                if skipped_files:
                     logger.info(
-                        f"Scanning process completed: {len(valid_files)} files Processed {len(processed_files)} skipped."
+                        f"Scanning process completed: {len(valid_files)} files processed, {len(skipped_files)} skipped (already tracked)."
                     )
                 else:
                     logger.info(
-                        f"Scanning process completed: {len(valid_files)} files Processed."
+                        f"Scanning process completed: {len(valid_files)} files processed."
                     )
             else:
                 logger.info(
-                    "No files to process after filtering already processed files."
+                    "No new files to process after filtering already tracked files."
                 )
         else:
             # No new files to index, check if there are any documents in the queue
