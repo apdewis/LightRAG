@@ -3143,8 +3143,75 @@ class LightRAG:
 
             if not chunk_ids:
                 logger.warning(f"No chunks found for document {doc_id}")
+
+                # Check if this is a multimodal wrapper doc with child doc_ids
+                metadata = doc_status_data.get("metadata", {}) or {}
+                child_doc_ids = metadata.get("multimodal_child_doc_ids", [])
+                content_summary = doc_status_data.get("content_summary", "")
+                is_multimodal_wrapper = content_summary.startswith("[Multimodal Document]")
+
                 # Mark that deletion operations have started
                 deletion_operations_started = True
+
+                if is_multimodal_wrapper and child_doc_ids:
+                    # Cascade deletion to child documents created by RAGAnything
+                    logger.info(
+                        f"Multimodal wrapper doc {doc_id}: cascading deletion to "
+                        f"{len(child_doc_ids)} child doc(s): {child_doc_ids}"
+                    )
+                    async with pipeline_status_lock:
+                        cascade_msg = (
+                            f"Cascading deletion to {len(child_doc_ids)} child documents"
+                        )
+                        pipeline_status["latest_message"] = cascade_msg
+                        pipeline_status["history_messages"].append(cascade_msg)
+
+                    child_results = []
+                    for child_id in child_doc_ids:
+                        try:
+                            child_result = await self.adelete_by_doc_id(
+                                child_id, delete_llm_cache=delete_llm_cache
+                            )
+                            child_results.append(child_result)
+                            logger.info(
+                                f"Child doc {child_id} deletion: {child_result.status}"
+                            )
+                        except Exception as child_err:
+                            logger.error(
+                                f"Failed to delete child doc {child_id}: {child_err}"
+                            )
+
+                    # Now delete the wrapper doc itself
+                    try:
+                        await self.full_docs.delete([doc_id])
+                        await self.doc_status.delete([doc_id])
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to delete multimodal wrapper doc {doc_id}: {e}"
+                        )
+                        raise Exception(f"Failed to delete wrapper document entry: {e}") from e
+
+                    successful_children = sum(
+                        1 for r in child_results if r.status == "success"
+                    )
+                    log_message = (
+                        f"Multimodal document deleted: {doc_id} "
+                        f"({successful_children}/{len(child_doc_ids)} child docs deleted)"
+                    )
+                    async with pipeline_status_lock:
+                        logger.info(log_message)
+                        pipeline_status["latest_message"] = log_message
+                        pipeline_status["history_messages"].append(log_message)
+
+                    return DeletionResult(
+                        status="success",
+                        doc_id=doc_id,
+                        message=log_message,
+                        status_code=200,
+                        file_path=file_path,
+                    )
+
+                # Regular doc with no chunks — just delete the entry
                 try:
                     # Still need to delete the doc status and full doc
                     await self.full_docs.delete([doc_id])
