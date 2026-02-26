@@ -1210,35 +1210,6 @@ def _extract_xlsx(file_bytes: bytes) -> str:
     return "\n".join(content_parts)
 
 
-async def _register_multimodal_doc_status(
-    rag: LightRAG,
-    file_path: Path,
-    track_id: str,
-    file_size: int,
-    status: DocStatus,
-) -> str:
-    """Register or update a multimodal document in doc_status tracking.
-
-    Returns the generated doc_id for subsequent updates.
-    """
-    doc_content = f"[Multimodal Document] {file_path.name}"
-    doc_id = compute_mdhash_id(doc_content, prefix="doc-")
-    now_iso = datetime.now(timezone.utc).isoformat()
-    doc_status_data = {
-        doc_id: {
-            "content_summary": doc_content,
-            "content_length": file_size,
-            "status": status,
-            "file_path": str(file_path.name),
-            "track_id": track_id,
-            "created_at": now_iso,
-            "updated_at": now_iso,
-        }
-    }
-    await rag.doc_status.upsert(doc_status_data)
-    return doc_id
-
-
 async def _update_multimodal_pipeline_status(
     rag: LightRAG, message: str, busy: bool = True, job_name: str = "multimodal processing"
 ) -> None:
@@ -1454,10 +1425,6 @@ async def pipeline_enqueue_file(
                 case ".pdf":
                     try:
                         if rag_anything is not None:
-                            # Register as PROCESSING immediately so the UI shows progress
-                            doc_id = await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.PROCESSING
-                            )
                             await _update_multimodal_pipeline_status(
                                 rag,
                                 f"[MinerU] Parsing multimodal PDF: {file_path.name}",
@@ -1466,14 +1433,13 @@ async def pipeline_enqueue_file(
 
                             # Use RAGAnything for multimodal PDF processing
                             # (extracts text, images, tables, equations via MinerU)
+                            # process_document_complete() internally calls lightrag.ainsert()
+                            # which creates proper doc_status entries with chunks_list,
+                            # enabling correct deletion later.
                             await rag_anything.process_document_complete(
                                 file_path=str(file_path)
                             )
 
-                            # Update status to PROCESSED after completion
-                            await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.PROCESSED
-                            )
                             await _update_multimodal_pipeline_status(
                                 rag,
                                 f"[MinerU] Completed multimodal PDF: {file_path.name}",
@@ -1514,9 +1480,6 @@ async def pipeline_enqueue_file(
                                 f"[MinerU] Failed multimodal PDF: {file_path.name}: {e}",
                                 busy=False,
                             )
-                            await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.FAILED
-                            )
                         error_files = [
                             {
                                 "file_path": str(file_path.name),
@@ -1536,10 +1499,6 @@ async def pipeline_enqueue_file(
                 case ".docx":
                     try:
                         if rag_anything is not None:
-                            # Register as PROCESSING immediately so the UI shows progress
-                            doc_id = await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.PROCESSING
-                            )
                             await _update_multimodal_pipeline_status(
                                 rag,
                                 f"[MinerU] Parsing multimodal DOCX: {file_path.name}",
@@ -1550,10 +1509,6 @@ async def pipeline_enqueue_file(
                                 file_path=str(file_path)
                             )
 
-                            # Update status to PROCESSED after completion
-                            await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.PROCESSED
-                            )
                             await _update_multimodal_pipeline_status(
                                 rag,
                                 f"[MinerU] Completed multimodal DOCX: {file_path.name}",
@@ -1590,9 +1545,6 @@ async def pipeline_enqueue_file(
                                 f"[MinerU] Failed multimodal DOCX: {file_path.name}: {e}",
                                 busy=False,
                             )
-                            await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.FAILED
-                            )
                         error_files = [
                             {
                                 "file_path": str(file_path.name),
@@ -1612,10 +1564,6 @@ async def pipeline_enqueue_file(
                 case ".pptx":
                     try:
                         if rag_anything is not None:
-                            # Register as PROCESSING immediately so the UI shows progress
-                            doc_id = await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.PROCESSING
-                            )
                             await _update_multimodal_pipeline_status(
                                 rag,
                                 f"[MinerU] Parsing multimodal PPTX: {file_path.name}",
@@ -1626,10 +1574,6 @@ async def pipeline_enqueue_file(
                                 file_path=str(file_path)
                             )
 
-                            # Update status to PROCESSED after completion
-                            await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.PROCESSED
-                            )
                             await _update_multimodal_pipeline_status(
                                 rag,
                                 f"[MinerU] Completed multimodal PPTX: {file_path.name}",
@@ -1666,9 +1610,6 @@ async def pipeline_enqueue_file(
                                 f"[MinerU] Failed multimodal PPTX: {file_path.name}: {e}",
                                 busy=False,
                             )
-                            await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.FAILED
-                            )
                         error_files = [
                             {
                                 "file_path": str(file_path.name),
@@ -1688,10 +1629,6 @@ async def pipeline_enqueue_file(
                 case ".xlsx":
                     try:
                         if rag_anything is not None:
-                            # Register as PROCESSING immediately so the UI shows progress
-                            doc_id = await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.PROCESSING
-                            )
                             await _update_multimodal_pipeline_status(
                                 rag,
                                 f"[MinerU] Parsing multimodal XLSX: {file_path.name}",
@@ -1702,10 +1639,6 @@ async def pipeline_enqueue_file(
                                 file_path=str(file_path)
                             )
 
-                            # Update status to PROCESSED after completion
-                            await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.PROCESSED
-                            )
                             await _update_multimodal_pipeline_status(
                                 rag,
                                 f"[MinerU] Completed multimodal XLSX: {file_path.name}",
@@ -1741,9 +1674,6 @@ async def pipeline_enqueue_file(
                                 rag,
                                 f"[MinerU] Failed multimodal XLSX: {file_path.name}: {e}",
                                 busy=False,
-                            )
-                            await _register_multimodal_doc_status(
-                                rag, file_path, track_id, file_size, DocStatus.FAILED
                             )
                         error_files = [
                             {
@@ -1781,10 +1711,6 @@ async def pipeline_enqueue_file(
                         return False, track_id
 
                     try:
-                        # Register as PROCESSING immediately so the UI shows progress
-                        doc_id = await _register_multimodal_doc_status(
-                            rag, file_path, track_id, file_size, DocStatus.PROCESSING
-                        )
                         await _update_multimodal_pipeline_status(
                             rag,
                             f"[MinerU] Parsing multimodal image: {file_path.name}",
@@ -1792,14 +1718,12 @@ async def pipeline_enqueue_file(
                         )
 
                         # Use RAGAnything's process_document_complete to process the image.
+                        # process_document_complete() internally calls lightrag.ainsert()
+                        # which creates proper doc_status entries with chunks_list.
                         await rag_anything.process_document_complete(
                             file_path=str(file_path),
                         )
 
-                        # Update status to PROCESSED after completion
-                        await _register_multimodal_doc_status(
-                            rag, file_path, track_id, file_size, DocStatus.PROCESSED
-                        )
                         await _update_multimodal_pipeline_status(
                             rag,
                             f"[MinerU] Completed multimodal image: {file_path.name}",
@@ -1818,9 +1742,6 @@ async def pipeline_enqueue_file(
                             rag,
                             f"[MinerU] Failed multimodal image: {file_path.name}: {e}",
                             busy=False,
-                        )
-                        await _register_multimodal_doc_status(
-                            rag, file_path, track_id, file_size, DocStatus.FAILED
                         )
                         error_files = [
                             {
